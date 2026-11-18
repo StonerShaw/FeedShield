@@ -1,0 +1,14 @@
+plugins {
+    id 'com.android.application' version '8.9.2'
+}
+android {
+    namespace 'app.local.rednoteshield'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'app.local.rednoteshield'
+        minSdk 26
+        targetSdk 34
+        versionCode 6
+        versionName '0.6'
+    }
+}
