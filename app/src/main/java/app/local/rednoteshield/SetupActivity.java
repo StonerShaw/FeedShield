@@ -1,6 +1,7 @@
 package app.local.rednoteshield;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.TimePickerDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -16,6 +17,8 @@ import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
+
+import java.util.List;
 
 public final class SetupActivity extends Activity {
     static final String PREFS = "shield";
@@ -70,35 +73,101 @@ public final class SetupActivity extends Activity {
 
     private void addSchedule() {
         Switch schedule = new Switch(this);
-        schedule.setText("每天定时启用遮罩");
+        schedule.setText("每天定时切换遮罩");
         schedule.setChecked(preferences.getBoolean(DailySchedule.ENABLED, false));
         page.addView(schedule);
-        addText("按手机本地时间重复。结束早于开始时，持续到次日。同一时间表示全天。", 14);
+        addText("按手机本地时间每天重复。结束早于开始时跨午夜，开始和结束相同表示全天。", 14);
 
-        Button start = addTimeButton("启用时间", DailySchedule.START, DailySchedule.DEFAULT_START);
-        Button end = addTimeButton("停用时间", DailySchedule.END, DailySchedule.DEFAULT_END);
-        start.setEnabled(schedule.isChecked());
-        end.setEnabled(schedule.isChecked());
+        List<DailySchedule.Range> ranges = DailySchedule.readRanges(preferences);
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        page.addView(controls);
+
+        RadioGroup modes = new RadioGroup(this);
+        RadioButton masked = new RadioButton(this);
+        masked.setId(android.view.View.generateViewId());
+        masked.setText("仅在这些时段遮罩");
+        modes.addView(masked);
+        RadioButton unmasked = new RadioButton(this);
+        unmasked.setId(android.view.View.generateViewId());
+        unmasked.setText("仅在这些时段无遮罩");
+        modes.addView(unmasked);
+        modes.check(preferences.getBoolean(DailySchedule.UNMASKED, false)
+                ? unmasked.getId() : masked.getId());
+        controls.addView(modes);
+
+        LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        controls.addView(rows);
+        modes.setOnCheckedChangeListener((group, checkedId) -> {
+            preferences.edit().putBoolean(DailySchedule.UNMASKED, checkedId == unmasked.getId()).apply();
+            renderScheduleRanges(rows, ranges);
+        });
+        renderScheduleRanges(rows, ranges);
+
+        Button add = new Button(this);
+        add.setText("添加时间段");
+        add.setOnClickListener(view -> editScheduleRange(rows, ranges, ranges.size(),
+                new DailySchedule.Range(DailySchedule.DEFAULT_START, DailySchedule.DEFAULT_END)));
+        controls.addView(add);
+        controls.setVisibility(schedule.isChecked() ? LinearLayout.VISIBLE : LinearLayout.GONE);
         schedule.setOnCheckedChangeListener((button, enabled) -> {
             preferences.edit().putBoolean(DailySchedule.ENABLED, enabled).apply();
-            start.setEnabled(enabled);
-            end.setEnabled(enabled);
+            controls.setVisibility(enabled ? LinearLayout.VISIBLE : LinearLayout.GONE);
         });
     }
 
-    private Button addTimeButton(String title, String key, int defaultTime) {
-        Button button = new Button(this);
-        button.setText(title + " " + DailySchedule.format(preferences.getInt(key, defaultTime)));
-        button.setOnClickListener(view -> {
-            int time = preferences.getInt(key, defaultTime);
-            new TimePickerDialog(this, (picker, hour, minute) -> {
-                int selected = hour * 60 + minute;
-                preferences.edit().putInt(key, selected).apply();
-                button.setText(title + " " + DailySchedule.format(selected));
-            }, time / 60, time % 60, DateFormat.is24HourFormat(this)).show();
-        });
-        page.addView(button);
-        return button;
+    private void renderScheduleRanges(LinearLayout rows, List<DailySchedule.Range> ranges) {
+        rows.removeAllViews();
+        if (ranges.isEmpty()) {
+            TextView empty = new TextView(this);
+            boolean unmasked = preferences.getBoolean(DailySchedule.UNMASKED, false);
+            empty.setText(unmasked ? "没有时间段，全天遮罩。" : "没有时间段，全天无遮罩。");
+            rows.addView(empty);
+        }
+        for (int i = 0; i < ranges.size(); i++) {
+            int index = i;
+            DailySchedule.Range range = ranges.get(index);
+            Button row = new Button(this);
+            row.setText(range.display());
+            row.setContentDescription("编辑时段 " + range.display());
+            row.setOnClickListener(view -> new AlertDialog.Builder(this)
+                    .setTitle(range.display())
+                    .setPositiveButton("修改", (dialog, which) -> editScheduleRange(rows, ranges, index, range))
+                    .setNeutralButton("删除", (dialog, which) -> {
+                        ranges.remove(index);
+                        saveScheduleRanges(rows, ranges);
+                    })
+                    .setNegativeButton("取消", null)
+                    .show());
+            rows.addView(row, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        }
+    }
+
+    private void editScheduleRange(LinearLayout rows, List<DailySchedule.Range> ranges, int index,
+            DailySchedule.Range range) {
+        TimePickerDialog startPicker = new TimePickerDialog(this, (picker, hour, minute) -> {
+            int start = hour * 60 + minute;
+            TimePickerDialog endPicker = new TimePickerDialog(this, (endView, endHour, endMinute) -> {
+                DailySchedule.Range updated = new DailySchedule.Range(start, endHour * 60 + endMinute);
+                if (index == ranges.size()) {
+                    ranges.add(updated);
+                } else {
+                    ranges.set(index, updated);
+                }
+                saveScheduleRanges(rows, ranges);
+            }, range.end / 60, range.end % 60, DateFormat.is24HourFormat(this));
+            endPicker.setTitle("结束时间");
+            endPicker.show();
+        }, range.start / 60, range.start % 60, DateFormat.is24HourFormat(this));
+        startPicker.setTitle("开始时间");
+        startPicker.show();
+    }
+
+    private void saveScheduleRanges(LinearLayout rows, List<DailySchedule.Range> ranges) {
+        DailySchedule.saveRanges(preferences, ranges);
+        renderScheduleRanges(rows, ranges);
     }
 
     static boolean systemIsDark(Configuration configuration) {

@@ -22,6 +22,7 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.TextView;
 
 import java.time.LocalTime;
+import java.util.List;
 
 public final class ShieldService extends AccessibilityService {
     private static final String REDNOTE = "com.xingin.xhs";
@@ -37,8 +38,12 @@ public final class ShieldService extends AccessibilityService {
     private final Rect covered = new Rect();
     private WindowManager windows;
     private SharedPreferences preferences;
+    private List<DailySchedule.Range> scheduleRanges;
     private final SharedPreferences.OnSharedPreferenceChangeListener preferenceListener =
-            (settings, key) -> scheduleRefresh();
+            (settings, key) -> {
+                scheduleRanges = DailySchedule.readRanges(settings);
+                scheduleRefresh();
+            };
     private TextView shield;
     private boolean clockRegistered;
     private final BroadcastReceiver clockChanges = new BroadcastReceiver() {
@@ -54,6 +59,7 @@ public final class ShieldService extends AccessibilityService {
     protected void onServiceConnected() {
         windows = getSystemService(WindowManager.class);
         preferences = getSharedPreferences(SetupActivity.PREFS, MODE_PRIVATE);
+        scheduleRanges = DailySchedule.readRanges(preferences);
         preferences.registerOnSharedPreferenceChangeListener(preferenceListener);
         if (!clockRegistered) {
             IntentFilter clockEvents = new IntentFilter(Intent.ACTION_TIME_TICK);
@@ -160,9 +166,8 @@ public final class ShieldService extends AccessibilityService {
             return true;
         }
         LocalTime now = LocalTime.now();
-        return DailySchedule.contains(now.getHour() * 60 + now.getMinute(),
-                preferences.getInt(DailySchedule.START, DailySchedule.DEFAULT_START),
-                preferences.getInt(DailySchedule.END, DailySchedule.DEFAULT_END));
+        return DailySchedule.allowsShield(now.getHour() * 60 + now.getMinute(), scheduleRanges,
+                preferences.getBoolean(DailySchedule.UNMASKED, false));
     }
 
     private AccessibilityNodeInfo focusedAppRoot() {
