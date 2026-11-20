@@ -1,5 +1,0 @@
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@drawable/rednote_store_icon"
-          android:left="13dp" android:top="13dp" android:right="13dp" android:bottom="13dp"/>
-    <item android:drawable="@drawable/shield_icon_mark"/>
-</layer-list>

@@ -8,9 +8,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Color;
-import android.graphics.PixelFormat;
 import android.graphics.Rect;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -22,7 +20,9 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.TextView;
 
 import java.time.LocalTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class ShieldService extends AccessibilityService {
     private static final String REDNOTE = "com.xingin.xhs";
@@ -39,17 +39,31 @@ public final class ShieldService extends AccessibilityService {
     private WindowManager windows;
     private SharedPreferences preferences;
     private List<DailySchedule.Range> scheduleRanges;
+    private RuleRecorder recorder;
+    private PageShadeDetector pageShade;
+    private int paletteWindowId;
+    private long recordingSession;
+    private final Runnable sessionTimeout = this::scheduleRefresh;
+    private static final Map<String, String> LAST_DECISION = new HashMap<>();
+
+    static String lastDecision(String app) {
+        return LAST_DECISION.getOrDefault(app, "尚未检测此 App");
+    }
     private final SharedPreferences.OnSharedPreferenceChangeListener preferenceListener =
             (settings, key) -> {
                 scheduleRanges = DailySchedule.readRanges(settings);
+                if (CustomRules.RULES.equals(key)) {
+                    rules = CustomRules.read(settings);
+                }
                 scheduleRefresh();
             };
     private TextView shield;
+    private Map<String, CustomRules.Rule> rules;
     private boolean clockRegistered;
     private final BroadcastReceiver clockChanges = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (preferences.getBoolean(DailySchedule.ENABLED, false)) {
+            if (preferences.getBoolean(DailySchedule.ENABLED, false) || recordingSession != 0) {
                 scheduleRefresh();
             }
         }
@@ -60,6 +74,9 @@ public final class ShieldService extends AccessibilityService {
         windows = getSystemService(WindowManager.class);
         preferences = getSharedPreferences(SetupActivity.PREFS, MODE_PRIVATE);
         scheduleRanges = DailySchedule.readRanges(preferences);
+        rules = CustomRules.read(preferences);
+        pageShade = new PageShadeDetector(this, this::refreshVisiblePalette);
+        recorder = new RuleRecorder(this, preferences, windows, this::scheduleRefresh, this::applyPalette);
         preferences.registerOnSharedPreferenceChangeListener(preferenceListener);
         if (!clockRegistered) {
             IntentFilter clockEvents = new IntentFilter(Intent.ACTION_TIME_TICK);
@@ -73,9 +90,13 @@ public final class ShieldService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (preferences == null) {
+            return;
+        }
         int type = event.getEventType();
-        boolean rednote = event.getPackageName() != null && REDNOTE.contentEquals(event.getPackageName());
-        if (rednote && shield != null && type == AccessibilityEvent.TYPE_VIEW_CLICKED
+        String app = event.getPackageName() == null ? "" : event.getPackageName().toString();
+        boolean monitored = REDNOTE.equals(app) || rules.containsKey(app);
+        if (monitored && shield != null && type == AccessibilityEvent.TYPE_VIEW_CLICKED
                 && clickedNavigation(event)) {
             hideShield();
             suppressUntil = SystemClock.uptimeMillis() + NAVIGATION_GRACE_MS;
@@ -83,7 +104,7 @@ public final class ShieldService extends AccessibilityService {
         } else if (type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
                 || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             scheduleRefresh(true);
-        } else if (rednote) {
+        } else if (monitored || app.equals(CustomRules.recordingApp(preferences))) {
             scheduleRefresh(type == AccessibilityEvent.TYPE_VIEW_SELECTED
                     || type == AccessibilityEvent.TYPE_VIEW_CLICKED);
         }
@@ -123,23 +144,85 @@ public final class ShieldService extends AccessibilityService {
         handler.postAtTime(refresh, time);
     }
 
-    private void refreshShield() {
-        if (!scheduleAllowsShield()) {
-            suppressUntil = 0;
-            hideShield();
-            return;
+    private String updateRecordingSession() {
+        String target = CustomRules.recordingApp(preferences);
+        long next = target.isEmpty() ? 0 : preferences.getLong(CustomRules.RECORDING_END, 0);
+        if (next != recordingSession) {
+            recorder.clear();
+            handler.removeCallbacks(sessionTimeout);
+            recordingSession = next;
+            if (next != 0) {
+                boolean resize = preferences.getBoolean(CustomRules.RECORDING_RESIZE, false);
+                CustomRules.Rule existing = resize ? rules.get(target) : null;
+                if (resize && existing == null) {
+                    CustomRules.endRecording(preferences, "原规则已删除");
+                    return "";
+                }
+                recorder.configure(target, existing);
+                handler.postDelayed(sessionTimeout, Math.max(1, next - System.currentTimeMillis()));
+            }
         }
+        if (next == 0 && preferences.contains(CustomRules.RECORDING_APP)) {
+            CustomRules.endRecording(preferences, "录制已超时");
+        }
+        return target;
+    }
+
+    private void refreshShield() {
+        String recordingApp = updateRecordingSession();
         AccessibilityNodeInfo root = focusedAppRoot();
         if (root == null) {
+            pageShade.clear();
+            recorder.suspend();
             suppressUntil = 0;
             hideShield();
             return;
         }
-        Rect feed = null;
         try {
-            if (root.getPackageName() != null && REDNOTE.contentEquals(root.getPackageName())) {
-                Rect screen = new Rect();
-                root.getBoundsInScreen(screen);
+            String app = root.getPackageName() == null ? "" : root.getPackageName().toString();
+            Rect screen = new Rect();
+            root.getBoundsInScreen(screen);
+            paletteWindowId = root.getWindowId();
+            if (app.equals(recordingApp) && !recordingApp.isEmpty()) {
+                suppressUntil = 0;
+                hideShield();
+                if (recorder.takeCaptureRequest()) {
+                    recorder.capture(root, screen, app);
+                }
+                recorder.update(root, screen, app);
+                observePageShade(screen, recorder.trialBounds());
+                recorder.refreshPalette();
+                return;
+            }
+            recorder.suspend();
+            applySavedRule(root, screen, app);
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private void applySavedRule(AccessibilityNodeInfo root, Rect screen, String app) {
+        CustomRules.Rule custom = rules.get(app);
+        boolean preset = REDNOTE.equals(app);
+        if (custom == null && !preset) {
+            pageShade.clear();
+            suppressUntil = 0;
+            hideShield();
+            return;
+        }
+
+        Rect feed = null;
+        String reason;
+        if (custom != null ? !custom.enabled : !preferences.getBoolean("rednote_preset", true)) {
+            reason = "规则已暂停";
+        } else if (!scheduleAllowsShield()) {
+            reason = "检测时不在遮罩时段";
+        } else if (custom != null && !custom.supportsWindow(screen)) {
+            reason = "窗口比例与录制时不同";
+        } else {
+            if (custom != null) {
+                feed = custom.matchPage(root, screen);
+            } else {
                 DiscoveryLayout layout = new DiscoveryLayout(screen);
                 layout.visit(root, false);
                 float density = getResources().getDisplayMetrics().density;
@@ -147,18 +230,21 @@ public final class ShieldService extends AccessibilityService {
                 int expandBottom = Math.round(preferences.getInt(SetupActivity.BOTTOM, 0) * density);
                 feed = layout.feedBounds(expandTop, expandBottom);
             }
-        } finally {
-            root.recycle();
+            reason = feed == null ? "页面未匹配" : "已显示遮罩";
         }
+
         if (feed == null) {
+            pageShade.clear();
             suppressUntil = 0;
             hideShield();
         } else if (SystemClock.uptimeMillis() < suppressUntil) {
-            // Only suppress a reappearance while Android still reports the old discovery page.
             scheduleAt(suppressUntil);
+            return;
         } else {
+            observePageShade(screen, feed);
             showShield(feed);
         }
+        LAST_DECISION.put(app, reason);
     }
 
     private boolean scheduleAllowsShield() {
@@ -206,22 +292,12 @@ public final class ShieldService extends AccessibilityService {
             }
         }
 
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                bounds.width(), bounds.height(), WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.OPAQUE);
-        params.gravity = Gravity.TOP | Gravity.LEFT;
-        params.x = bounds.left;
-        params.y = bounds.top;
-        if (Build.VERSION.SDK_INT >= 30) {
-            params.setFitInsetsTypes(0);
-        }
+        WindowManager.LayoutParams params = OverlayLayout.at(bounds);
 
         if (shield == null) {
             TextView panel = new TextView(this);
             panel.setGravity(Gravity.CENTER);
-            panel.setText("发现推荐已隐藏");
+            panel.setText("推荐已隐藏");
             panel.setTextSize(16);
             applyPalette(panel);
             panel.setImportantForAccessibility(TextView.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -234,11 +310,29 @@ public final class ShieldService extends AccessibilityService {
         covered.set(bounds);
     }
 
+    private void observePageShade(Rect window, Rect mask) {
+        int mode = preferences.getInt(SetupActivity.THEME, SetupActivity.THEME_SYSTEM);
+        if (mode == SetupActivity.THEME_SYSTEM && !SetupActivity.systemIsDark(getResources().getConfiguration())
+                && !mask.isEmpty()) {
+            pageShade.observe(paletteWindowId, window, mask);
+        } else {
+            pageShade.clear();
+        }
+    }
+
+    private void refreshVisiblePalette() {
+        if (shield != null) {
+            applyPalette(shield);
+        }
+        recorder.refreshPalette();
+    }
+
     private void applyPalette(TextView panel) {
         int mode = preferences.getInt(SetupActivity.THEME, SetupActivity.THEME_SYSTEM);
         boolean dark = mode == SetupActivity.THEME_DARK
                 || (mode == SetupActivity.THEME_SYSTEM
-                        && SetupActivity.systemIsDark(getResources().getConfiguration()));
+                        && (SetupActivity.systemIsDark(getResources().getConfiguration())
+                                || pageShade.isDark(paletteWindowId)));
         panel.setTextColor(dark ? Color.rgb(200, 203, 208) : Color.rgb(87, 92, 100));
         panel.setBackgroundColor(dark ? Color.rgb(22, 22, 24) : Color.rgb(247, 248, 250));
     }
@@ -254,6 +348,10 @@ public final class ShieldService extends AccessibilityService {
     @Override
     public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
+        if (pageShade == null) {
+            return;
+        }
+        pageShade.clear();
         hideShield();
         scheduleRefresh();
     }
@@ -261,7 +359,15 @@ public final class ShieldService extends AccessibilityService {
     @Override
     public void onInterrupt() {
         handler.removeCallbacks(refresh);
+        handler.removeCallbacks(sessionTimeout);
         refreshAt = Long.MAX_VALUE;
+        recordingSession = 0;
+        if (pageShade != null) {
+            pageShade.clear();
+        }
+        if (recorder != null) {
+            recorder.clear();
+        }
         hideShield();
     }
 
