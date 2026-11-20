@@ -21,7 +21,7 @@ FeedShield 0.10 是适用于 Android 8.0 及以上的推荐流遮罩。用安卓
 
 ## 下载与构建
 
-GitHub 的 [历史发布 v0.10](https://github.com/StonerShaw/FeedShield/releases/tag/v0.10) 是更名前的小红书专用版。通用版 FeedShield 的源码位于 `main`。
+从 [GitHub Releases](https://github.com/StonerShaw/FeedShield/releases/tag/v0.10) 下载 `FeedShield-0.10.apk`。从小红书专用版覆盖安装时可保留原设置。
 
 用 Android Studio 打开本项目，使用 JDK 17、Gradle 8.11.1 和 Android SDK 35。同步后运行 `assembleDebug`。
 
