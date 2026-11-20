@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 
 public final class ShieldService extends AccessibilityService {
-    private static final String REDNOTE = "com.xingin.xhs";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private static final long NAVIGATION_GRACE_MS = 220;
     private static final long CONTENT_REFRESH_MS = 32;
@@ -76,7 +75,7 @@ public final class ShieldService extends AccessibilityService {
         scheduleRanges = DailySchedule.readRanges(preferences);
         rules = CustomRules.read(preferences);
         pageShade = new PageShadeDetector(this, this::refreshVisiblePalette);
-        recorder = new RuleRecorder(this, preferences, windows, this::scheduleRefresh, this::applyPalette);
+        recorder = new RuleRecorder(this, preferences, windows, this::scheduleRefresh, this::applyPalette, this::rednoteBounds);
         preferences.registerOnSharedPreferenceChangeListener(preferenceListener);
         if (!clockRegistered) {
             IntentFilter clockEvents = new IntentFilter(Intent.ACTION_TIME_TICK);
@@ -95,7 +94,7 @@ public final class ShieldService extends AccessibilityService {
         }
         int type = event.getEventType();
         String app = event.getPackageName() == null ? "" : event.getPackageName().toString();
-        boolean monitored = REDNOTE.equals(app) || rules.containsKey(app);
+        boolean monitored = CustomRules.REDNOTE_APP.equals(app) || rules.containsKey(app);
         if (monitored && shield != null && type == AccessibilityEvent.TYPE_VIEW_CLICKED
                 && clickedNavigation(event)) {
             hideShield();
@@ -153,7 +152,7 @@ public final class ShieldService extends AccessibilityService {
             recordingSession = next;
             if (next != 0) {
                 boolean resize = preferences.getBoolean(CustomRules.RECORDING_RESIZE, false);
-                CustomRules.Rule existing = resize ? rules.get(target) : null;
+                CustomRules.Rule existing = resize ? CustomRules.ruleFor(target, rules, preferences) : null;
                 if (resize && existing == null) {
                     CustomRules.endRecording(preferences, "原规则已删除");
                     return "";
@@ -202,9 +201,8 @@ public final class ShieldService extends AccessibilityService {
     }
 
     private void applySavedRule(AccessibilityNodeInfo root, Rect screen, String app) {
-        CustomRules.Rule custom = rules.get(app);
-        boolean preset = REDNOTE.equals(app);
-        if (custom == null && !preset) {
+        CustomRules.Rule rule = CustomRules.ruleFor(app, rules, preferences);
+        if (rule == null) {
             pageShade.clear();
             suppressUntil = 0;
             hideShield();
@@ -213,23 +211,14 @@ public final class ShieldService extends AccessibilityService {
 
         Rect feed = null;
         String reason;
-        if (custom != null ? !custom.enabled : !preferences.getBoolean("rednote_preset", true)) {
+        if (!rule.enabled) {
             reason = "规则已暂停";
         } else if (!scheduleAllowsShield()) {
             reason = "检测时不在遮罩时段";
-        } else if (custom != null && !custom.supportsWindow(screen)) {
+        } else if (!rule.supportsWindow(screen)) {
             reason = "窗口比例与录制时不同";
         } else {
-            if (custom != null) {
-                feed = custom.matchPage(root, screen);
-            } else {
-                DiscoveryLayout layout = new DiscoveryLayout(screen);
-                layout.visit(root, false);
-                float density = getResources().getDisplayMetrics().density;
-                int expandTop = Math.round(preferences.getInt(SetupActivity.TOP, 0) * density);
-                int expandBottom = Math.round(preferences.getInt(SetupActivity.BOTTOM, 0) * density);
-                feed = layout.feedBounds(expandTop, expandBottom);
-            }
+            feed = rule.matchPage(root, screen, this::rednoteBounds);
             reason = feed == null ? "页面未匹配" : "已显示遮罩";
         }
 
@@ -245,6 +234,15 @@ public final class ShieldService extends AccessibilityService {
             showShield(feed);
         }
         LAST_DECISION.put(app, reason);
+    }
+
+    private Rect rednoteBounds(AccessibilityNodeInfo root, Rect screen) {
+        DiscoveryLayout layout = new DiscoveryLayout(screen);
+        layout.visit(root, false);
+        float density = getResources().getDisplayMetrics().density;
+        int expandTop = Math.round(preferences.getInt(CustomRules.LEGACY_TOP, 0) * density);
+        int expandBottom = Math.round(preferences.getInt(CustomRules.LEGACY_BOTTOM, 0) * density);
+        return layout.feedBounds(expandTop, expandBottom);
     }
 
     private boolean scheduleAllowsShield() {

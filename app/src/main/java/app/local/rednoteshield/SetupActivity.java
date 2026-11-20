@@ -22,7 +22,6 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
-import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -38,9 +37,6 @@ public final class SetupActivity extends Activity {
     static final int THEME_SYSTEM = 0;
     static final int THEME_LIGHT = 1;
     static final int THEME_DARK = 2;
-    static final String TOP = "top_expansion";
-    static final String BOTTOM = "bottom_expansion";
-    private static final int MAX_EXPANSION = 64;
     private LinearLayout page;
     private SharedPreferences preferences;
     private LinearLayout customControls;
@@ -87,16 +83,6 @@ public final class SetupActivity extends Activity {
         page = advanced;
         addText("遮罩颜色", 16);
         addThemeChoices();
-        addText("小红书预设的范围", 16);
-        addExpansion("向上扩大", TOP);
-        addExpansion("向下扩大", BOTTOM);
-        Button reset = new Button(this);
-        reset.setText("恢复默认范围");
-        reset.setOnClickListener(view -> {
-            preferences.edit().remove(TOP).remove(BOTTOM).apply();
-            recreate();
-        });
-        page.addView(reset);
         addButton("打开电池优化设置", new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
         page = main;
         advanced.setVisibility(LinearLayout.GONE);
@@ -183,18 +169,22 @@ public final class SetupActivity extends Activity {
         customControls.addView(record);
 
         Map<String, CustomRules.Rule> rules = CustomRules.read(preferences);
-        if (!rules.containsKey("com.xingin.xhs")) {
-            addRuleRow("com.xingin.xhs", "小红书", "发现 · 内置预设",
-                    preferences.getBoolean("rednote_preset", true),
-                    enabled -> preferences.edit().putBoolean("rednote_preset", enabled).apply(), null);
+        if (!rules.containsKey(CustomRules.REDNOTE_APP)) {
+            addRuleRow(CustomRules.REDNOTE_APP, "小红书", "发现 · 内置预设",
+                    preferences.getBoolean(CustomRules.REDNOTE_ENABLED, true),
+                    enabled -> preferences.edit().putBoolean(CustomRules.REDNOTE_ENABLED, enabled).apply(), null, null);
         }
         for (Map.Entry<String, CustomRules.Rule> entry : rules.entrySet()) {
             String app = entry.getKey();
             CustomRules.Rule rule = entry.getValue();
-            addRuleRow(app, app, "已录制页面", rule.enabled, enabled -> {
+            addRuleRow(app, app, rule.rednotePreset ? "发现 · 内置预设" : "已录制页面", rule.enabled, enabled -> {
                 rule.enabled = enabled;
                 CustomRules.save(preferences, rules);
-            }, () -> {
+            }, rule.rednotePreset ? "恢复默认范围" : "删除规则", () -> {
+                if (rule.rednotePreset) {
+                    preferences.edit().putBoolean(CustomRules.REDNOTE_ENABLED, rule.enabled)
+                            .remove(CustomRules.LEGACY_TOP).remove(CustomRules.LEGACY_BOTTOM).apply();
+                }
                 rules.remove(app);
                 CustomRules.save(preferences, rules);
                 renderCustomControls();
@@ -251,7 +241,7 @@ public final class SetupActivity extends Activity {
     }
 
     private void addRuleRow(String app, String fallbackName, String subtitle, boolean enabled,
-            java.util.function.Consumer<Boolean> toggle, Runnable delete) {
+            java.util.function.Consumer<Boolean> toggle, String deleteLabel, Runnable delete) {
         PackageManager manager = getPackageManager();
         String label = fallbackName;
         Drawable icon = manager.getDefaultActivityIcon();
@@ -279,11 +269,9 @@ public final class SetupActivity extends Activity {
             AlertDialog.Builder dialog = new AlertDialog.Builder(this)
                     .setTitle(details.getText()).setMessage(last)
                     .setNegativeButton("关闭", null);
+            dialog.setPositiveButton("调整范围", (window, which) -> startRecording(app, true));
             if (delete != null) {
-                dialog.setPositiveButton("调整范围", (window, which) -> startRecording(app, true));
-                dialog.setNeutralButton("删除规则", (window, which) -> delete.run());
-            } else {
-                dialog.setMessage(last + "\n\n可在「更多设置」调整内置预设的范围。");
+                dialog.setNeutralButton(deleteLabel, (window, which) -> delete.run());
             }
             dialog.show();
         });
@@ -452,24 +440,4 @@ public final class SetupActivity extends Activity {
         page.addView(button);
     }
 
-    private void addExpansion(String title, String key) {
-        int current = preferences.getInt(key, 0);
-        TextView label = addText(title + " " + current + " dp", 16);
-        SeekBar slider = new SeekBar(this);
-        slider.setMax(MAX_EXPANSION);
-        slider.setProgress(current);
-        slider.setContentDescription(title);
-        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
-                label.setText(title + " " + value + " dp");
-                if (fromUser) {
-                    preferences.edit().putInt(key, value).apply();
-                }
-            }
-            @Override public void onStartTrackingTouch(SeekBar bar) {}
-            @Override public void onStopTrackingTouch(SeekBar bar) {}
-        });
-        page.addView(slider);
-    }
 }

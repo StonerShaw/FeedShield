@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.Map;
+import java.util.function.BiFunction;
 
 final class CustomRules {
     static final String RECORDING_APP = "recording_app";
@@ -25,6 +26,10 @@ final class CustomRules {
     static final long RECORDING_DURATION_MS = 10 * 60 * 1000L;
     static final String RECORDING_STATUS = "custom_recording_status";
     static final String RULES = "custom_rules";
+    static final String REDNOTE_APP = "com.xingin.xhs";
+    static final String REDNOTE_ENABLED = "rednote_preset";
+    static final String LEGACY_TOP = "top_expansion";
+    static final String LEGACY_BOTTOM = "bottom_expansion";
     private static final int SCALE = 10000;
 
     static String recordingApp(SharedPreferences prefs) {
@@ -51,15 +56,25 @@ final class CustomRules {
                 for (int i = 0; i < features.length(); i++) {
                     required.add(features.getString(i));
                 }
-                if (!required.isEmpty()) {
+                boolean preset = REDNOTE_APP.equals(app) && item.optBoolean("rednotePreset", false);
+                if (preset || !required.isEmpty()) {
                     rules.put(app, new Rule(bounds, item.getDouble("aspect"), required,
-                            item.optBoolean("enabled", true)));
+                            item.optBoolean("enabled", true), preset));
                 }
             }
         } catch (JSONException ignored) {
             // Preserve any valid entries read before malformed local data.
         }
         return rules;
+    }
+
+    static Rule ruleFor(String app, Map<String, Rule> rules, SharedPreferences prefs) {
+        Rule saved = rules.get(app);
+        if (saved == null && REDNOTE_APP.equals(app)) {
+            return new Rule(null, 0, java.util.Collections.emptyList(),
+                    prefs.getBoolean(REDNOTE_ENABLED, true), true);
+        }
+        return saved;
     }
 
     static void save(SharedPreferences prefs, Map<String, Rule> rules) {
@@ -73,7 +88,7 @@ final class CustomRules {
             try {
                 list.put(new JSONObject().put("app", entry.getKey()).put("box", box)
                         .put("aspect", rule.aspect).put("features", new JSONArray(rule.required))
-                        .put("enabled", rule.enabled));
+                        .put("enabled", rule.enabled).put("rednotePreset", rule.rednotePreset));
             } catch (JSONException exception) {
                 throw new IllegalStateException(exception);
             }
@@ -86,21 +101,32 @@ final class CustomRules {
         private final double aspect;
         private final List<String> required;
         boolean enabled;
+        final boolean rednotePreset;
 
-        Rule(int[] bounds, double aspect, List<String> required, boolean enabled) {
+        Rule(int[] bounds, double aspect, List<String> required, boolean enabled, boolean rednotePreset) {
             this.bounds = bounds;
             this.aspect = aspect;
             this.required = required;
             this.enabled = enabled;
+            this.rednotePreset = rednotePreset;
         }
 
         boolean supportsWindow(Rect window) {
             return !window.isEmpty()
-                    && Math.abs((double) window.width() / window.height() / aspect - 1) <= 0.12;
+                    && (bounds == null || Math.abs((double) window.width() / window.height() / aspect - 1) <= 0.12);
         }
 
-        Rect matchPage(AccessibilityNodeInfo root, Rect window) {
-            if (!supportsWindow(window) || !new PageFeatures(root, window).values.containsAll(required)) {
+        Rect matchPage(AccessibilityNodeInfo root, Rect window,
+                BiFunction<AccessibilityNodeInfo, Rect, Rect> detectRednote) {
+            if (!supportsWindow(window)) {
+                return null;
+            }
+            if (rednotePreset) {
+                Rect discovered = detectRednote.apply(root, window);
+                if (discovered == null || bounds == null) {
+                    return discovered;
+                }
+            } else if (!new PageFeatures(root, window).values.containsAll(required)) {
                 return null;
             }
             Rect box = new Rect(window.left + toPixels(bounds[0], window.width()),
@@ -110,11 +136,7 @@ final class CustomRules {
             return !box.isEmpty() && window.contains(box) ? box : null;
         }
         Rule resized(Rect region, Rect window) {
-            Rule updated = makeRule(region, window, required);
-            if (updated != null) {
-                updated.enabled = enabled;
-            }
-            return updated;
+            return makeRule(region, window, required, enabled, rednotePreset);
         }
 
     }
@@ -171,6 +193,11 @@ final class CustomRules {
     }
 
     private static Rule makeRule(Rect region, Rect window, List<String> required) {
+        return makeRule(region, window, required, true, false);
+    }
+
+    private static Rule makeRule(Rect region, Rect window, List<String> required,
+            boolean enabled, boolean rednotePreset) {
         if (window.isEmpty() || region.isEmpty() || !window.contains(region)) {
             return null;
         }
@@ -178,7 +205,7 @@ final class CustomRules {
                 toFraction(region.top - window.top, window.height()),
                 toFraction(region.right - window.left, window.width()),
                 toFraction(region.bottom - window.top, window.height())};
-        return new Rule(box, (double) window.width() / window.height(), required, true);
+        return new Rule(box, (double) window.width() / window.height(), required, enabled, rednotePreset);
     }
 
     private static int toFraction(int pixels, int size) {

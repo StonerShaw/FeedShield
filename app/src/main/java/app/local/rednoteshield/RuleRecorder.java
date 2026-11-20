@@ -19,6 +19,7 @@ import android.widget.TextView;
 
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.BiFunction;
 
 final class RuleRecorder {
     private final Context context;
@@ -26,6 +27,7 @@ final class RuleRecorder {
     private final WindowManager windows;
     private final Runnable changed;
     private final Consumer<TextView> applyPalette;
+    private final BiFunction<AccessibilityNodeInfo, Rect, Rect> detectRednote;
     private View overlay;
     private View previewTint;
     private String currentApp;
@@ -42,12 +44,13 @@ final class RuleRecorder {
     private final Rect trialCovered = new Rect();
 
     RuleRecorder(Context context, SharedPreferences preferences, WindowManager windows, Runnable changed,
-            Consumer<TextView> applyPalette) {
+            Consumer<TextView> applyPalette, BiFunction<AccessibilityNodeInfo, Rect, Rect> detectRednote) {
         this.context = context;
         this.preferences = preferences;
         this.windows = windows;
         this.changed = changed;
         this.applyPalette = applyPalette;
+        this.detectRednote = detectRednote;
     }
 
     void configure(String app, CustomRules.Rule editRule) {
@@ -61,7 +64,7 @@ final class RuleRecorder {
             currentApp = null;
             return;
         }
-        Rect matched = trial == null || editingRegion ? null : trial.matchPage(root, bounds);
+        Rect matched = trial == null || editingRegion ? null : trial.matchPage(root, bounds, detectRednote);
         boolean samePageBounds = app.equals(currentApp) && bounds.equals(currentWindow);
         boolean sameTrial = matched == null ? trialMask == null : matched.equals(trialCovered);
         if (samePageBounds && sameTrial && overlay != null) {
@@ -92,7 +95,7 @@ final class RuleRecorder {
             return;
         }
         if (resizeRule != null && trial == null) {
-            Rect saved = resizeRule.matchPage(root, bounds);
+            Rect saved = resizeRule.matchPage(root, bounds, detectRednote);
             if (saved == null) {
                 Toast.makeText(context, "请回到已有规则对应的页面，再调整范围", Toast.LENGTH_LONG).show();
                 return;
@@ -136,7 +139,7 @@ final class RuleRecorder {
 
     private void saveTrial() {
         Map<String, CustomRules.Rule> rules = CustomRules.read(preferences);
-        CustomRules.Rule existing = rules.get(targetApp);
+        CustomRules.Rule existing = CustomRules.ruleFor(targetApp, rules, preferences);
         if (resizeRule != null && existing == null) {
             finish("原规则已删除");
             return;
